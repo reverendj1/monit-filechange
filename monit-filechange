@@ -1,0 +1,450 @@
+#!/bin/bash
+set -e
+
+readonly PRETTY_NAME="monit-filechange"
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly TEMP_FILE=/var/lib/monit-filechange.ini
+readonly CHANGE_ERROR_CODE=1
+readonly SAME_ERROR_CODE=2
+readonly GROW_ERROR_CODE=3
+readonly SHRINK_ERROR_CODE=4
+readonly SYNTAX_ERROR_CODE=5
+readonly OTHER_ERROR_CODE=6
+
+readonly HELP="${PRETTY_NAME} - monit-filechange is a script to check if a file has changed size since monit-filechange
+was last run. Although it's designed to work with a monitoring system such as m/monit, and as such, has proper exit
+codes, it can be used by itself too. This is handy for using in conjunction with scripts.
+
+Usage: ${SCRIPT_NAME} [OPTIONS] [FILE]
+
+Arguments:
+  -h, --help                  Prints this help text
+  -C, --change                Errors if the file has changed size at all
+  -c, --same                  Errors if the file has stayed the same size
+  -S, --grow                  Errors if the file has grown at all
+  -s, --shrink                Errors if the file has shrunk at all
+  -P, --growper=PERCENT       Errors if the file has grown by PERCENT percent
+  -p, --shrinkper=PERCENT     Errors if the file has shrunk by PERCENT percent
+  -B, --growb=SIZE            Errors if the file has grown by SIZE b
+  -b, --shrinkb=SIZE          Errors if the file has shrunk by SIZE b
+  -K, --growkb=SIZE           Errors if the file has grown by SIZE kb
+  -k, --shrinkkb=SIZE         Errors if the file has shrunk by SIZE kb
+  -M, --growmb=SIZE           Errors if the file has grown by SIZE mb
+  -m, --shrinkmb=SIZE         Errors if the file has shrunk by SIZE mb
+  -G, --growgb=SIZE           Errors if the file has grown by SIZE gb
+  -g, --shrinkgb=SIZE         Errors if the file has shrunk by SIZE gb
+
+Only one check may be passed at a time. If not specified, it will check if the file has changed size at all.
+
+Examples:
+  # error if file has changed size since monit-filechange was last ran
+  monit-filechange /etc/someapp/app.conf
+
+  # error if file has grown by 10% since monit-filechange was last ran
+  monit-filechange --growper 10 /var/log/somelog.log
+
+  # error if file has shrunk by 100MB since monit-filechange was last ran
+  monit-filechange --shrinkmb 100 /var/log/somelog.log
+
+  # error if file has shrunk at all since monit-filechange was last ran
+  monit-filechange --shrink /var/lib/somedb/mydb.db
+
+Monit Example:
+
+  check program log_shrink with path \"/usr/local/bin/monit-filechange --shrinkmb 100 /var/log/somelog.log\"
+    if status != 0 then alert
+
+Exit Codes:
+
+0: no errors
+${CHANGE_ERROR_CODE}: file has changed size when it shouldn't
+${SAME_ERROR_CODE}: file has not changed size when it should
+${GROW_ERROR_CODE}: file has grown when it shouldn't
+${SHRINK_ERROR_CODE}: file has shrunk when it shouldn't
+${SYNTAX_ERROR_CODE}: syntax error
+${OTHER_ERROR_CODE}: other error
+
+Requirements:
+* bash
+
+Creates a persistent state file, ${TEMP_FILE} to store file sizes
+"
+
+readonly REQUIRED_VARIABLES=("file_to_check")
+
+exit_code="0"
+checks_args=0
+check="change"
+
+
+# Argument parser
+function get_args () {
+  positional_args=""
+  while (( "$#" )); do
+    case "$1" in
+      -h|--help)
+        echo "${HELP}"
+        exit 1
+        ;;
+      -C|--change)
+        check="change"
+        checks_args=$((checks_args+1))
+        shift
+        ;;
+      -c|--same)
+        check="same"
+        checks_args=$((checks_args+1))
+        shift
+        ;;
+      -S|--grow)
+        check="grow"
+        check_unit="percent"
+        check_value=0
+        checks_args=$((checks_args+1))
+        shift
+        ;;
+      -s|--shrink)
+        check="shrink"
+        check_unit="percent"
+        check_value=0
+        checks_args=$((checks_args+1))
+        shift
+        ;;
+      -P|--growper)
+        check="grow"
+        check_unit="percent"
+        check_value="$2"
+        checks_args=$((checks_args+1))
+        shift 2
+        ;;
+      --p|--shrinkper)
+        check="shrink"
+        check_unit="percent"
+        check_value="$2"
+        checks_args=$((checks_args+1))
+        shift 2
+        ;;
+      -B|--growb)
+        check="grow"
+        check_unit="b"
+        check_value="$2"
+        checks_args=$((checks_args+1))
+        shift 2
+        ;;
+      -b|--shrinkb)
+        check="shrink"
+        check_unit="b"
+        check_value="$2"
+        checks_args=$((checks_args+1))
+        shift 2
+        ;;
+      -K|--growkb)
+        check="grow"
+        check_unit="kb"
+        check_value="$2"
+        checks_args=$((checks_args+1))
+        shift 2
+        ;;
+      -k|--shrinkkb)
+        check="shrink"
+        check_unit="kb"
+        check_value="$2"
+        checks_args=$((checks_args+1))
+        shift 2
+        ;;
+      -M|--growmb)
+        check="grow"
+        check_unit="mb"
+        check_value="$2"
+        checks_args=$((checks_args+1))
+        shift 2
+        ;;
+      -m|--shrinkmb)
+        check="shrink"
+        check_unit="mb"
+        check_value="$2"
+        checks_args=$((checks_args+1))
+        shift 2
+        ;;
+      -G|--growgb)
+        check="grow"
+        check_unit="gb"
+        check_value="$2"
+        checks_args=$((checks_args+1))
+        shift 2
+        ;;
+      -g|--shrinkgb)
+        check="shrink"
+        check_unit="gb"
+        check_value="$2"
+        checks_args=$((checks_args+1))
+        shift 2
+        ;;
+      -*|--*=) # unsupported flags
+        exit_cleanly 1 "Error: Unsupported flag $1\n\n${HELP}"
+        ;;
+      *)
+        file_to_check="$1"
+        shift
+        ;;
+    esac
+  done
+}
+
+
+# Checks if required variables are not empty. If any of the variables are empty, it will print them, and return 1
+#
+# $@ - array of variable names
+#
+# Example:
+# required_variables+=("host" "username" "password")
+# if ! check_required_variables ${required_variables[@]}; then
+#   exit_cleanly 1 "${HELP}"
+# fi
+function check_required_variables () {
+  local required_variables="$@"
+  local variable
+  local return_code=0
+
+  for variable in ${required_variables[@]}; do
+    eval value="$"${variable}""
+    if [[ -z "${value}" ]]; then
+      echo "${variable} is required!"
+      return_code=1
+    fi
+  done
+
+  return "${return_code}"
+}
+
+
+# convert bytes to another unit
+#
+# $1 bytes
+# $2 new unit
+function convert_bytes () {
+  local bytes="$1"
+  local unit="$2"
+
+  case "${unit}" in
+    b)
+      local divisor=1
+      ;;
+    kb)
+      local divisor=1024
+      ;;
+    mb)
+      local divisor=1048576
+      ;;
+    gb)
+      local divisor=1073741824
+      ;;
+  esac
+
+  echo "${bytes} / ${divisor}" | bc
+}
+
+
+# Exits with message after potential cleanup.
+# $1 - exit code (optional, default: 0)
+# $2 - exit message (optional)
+#
+# Example:
+# exit_cleanly 1 "Error: Unsupported flag $1\n\n${HELP}"
+function exit_cleanly () {
+  local exit_code="$1"
+  local exit_message="$2"
+
+  if [[ -n "${exit_message}" ]]; then
+    echo -e "${exit_message}"
+  fi
+
+  exit "${exit_code}"
+}
+
+
+# get old file size
+#
+# $1 file path to check
+#
+# Example:
+# old_file_size="$(get_old_file_size /var/log/somelog.log)"
+function get_old_file_size () {
+  local path="$1"
+
+  # $ cat /var/lib/monit-filechange.ini
+  # /var/log/somelog.log=3609
+  # /var/lib/somedb/mydb.db=16095049
+
+  grep "${path=}=" "${TEMP_FILE}" | cut -d'=' -f 2
+}
+
+
+# gets the largest unit possible for x bytes
+#
+# $1 bytes
+function get_unit_from_bytes () {
+  local bytes="$1"
+
+  if [[ "${bytes}" -ge 1073741824 ]]; then
+    echo "gb"
+  elif [[ "${bytes}" -ge 1048576 ]]; then
+    echo "mb"
+  elif [[ "${bytes}" -ge 1024 ]]; then
+    echo "kb"
+  else
+    echo "b"
+  fi
+}
+
+
+# Checks if a value is an integer. Returns 1 if value is not an integer, or is empty. Optionally checks if
+# value is positive.
+#
+# $1 - value to check
+# $2 - verify value is positive. If set, returns 2 if value is negative. (optional. Possible value is "true")
+#
+# Example:
+# is_integer "${myvar}"
+function is_integer () {
+  local value="$1"
+  local check_negative="$2"
+  local absolute_value="$(echo "${value}" | sed 's/^-//')"
+
+  case "${absolute_value}" in
+    '' | *[!0-9]*)
+      return 1
+      ;;
+    *)
+      true
+      ;;
+  esac
+
+  if [[ -n "${check_negative}" ]]; then
+    if [[ "${absolute_value}" != "${value}" ]]; then
+      return 2
+    fi
+  fi
+
+  return 0
+}
+
+
+# set new file size
+#
+# $1 file path to check
+# $2 new file size
+#
+# Example:
+# set_new_file_size /var/log/somelog.log 3609
+function set_new_file_size () {
+  local path="$1"
+  local sed_safe_path="$(echo "${path}" | sed 's/\//\\\//g')"
+  local file_size="$2"
+
+  # $ cat /var/lib/monit-filechange.ini
+  # /var/log/somelog.log=3609
+  # /var/lib/somedb/mydb.db=16095049
+
+  if ! grep --silent "${path}=" "${TEMP_FILE}"; then
+    echo "${path}=${file_size}" >> "${TEMP_FILE}"
+  else
+    sed -i "s/${sed_safe_path}=.*/${sed_safe_path}=${file_size}/" "${TEMP_FILE}"
+  fi
+}
+
+
+function main () {
+
+  get_args "$@"
+
+  # do some input validation
+
+  if ! check_required_variables ${REQUIRED_VARIABLES[@]}; then
+    exit_cleanly "${SYNTAX_ERROR_CODE}" "No file specified.\n\n${HELP}"
+  fi
+
+  if [[ ${checks_args} -gt 1 ]]; then
+    exit_cleanly "${SYNTAX_ERROR_CODE}" "Too many checks specified. Only one check can be used.\n\n${HELP}"
+  fi
+
+  if ! [[ -e "${file_to_check}" ]]; then
+    exit_cleanly "${OTHER_ERROR_CODE}" "File ${file_to_check} does not exist!"
+  fi
+
+  # create our state file if it doesn't exist
+  if ! [[ -e "${TEMP_FILE}" ]]; then
+    touch "${TEMP_FILE}"
+  fi
+
+  # du -b seems to be the most universal way to get the size of a file
+  new_file_size_bytes="$(du -b "$file_to_check" | cut -f1)"
+  old_file_size_bytes="$(get_old_file_size "${file_to_check}")"
+  if [[ -z "${old_file_size_bytes}" ]]; then
+    old_file_size_bytes="${new_file_size_bytes}"
+  fi
+  file_size_difference_bytes=$((new_file_size_bytes - old_file_size_bytes))
+
+  new_file_size_unit="$(get_unit_from_bytes "${new_file_size_bytes}")"
+  new_file_size_converted="$(convert_bytes ${new_file_size_bytes} "${new_file_size_unit}")"
+  old_file_size_unit="$(get_unit_from_bytes "${old_file_size_bytes}")"
+  old_file_size_converted="$(convert_bytes ${old_file_size_bytes} "${old_file_size_unit}")"
+
+  if [[ -n "${check_unit}" && "${check_unit}" != "percent" ]]; then
+    file_size_difference_converted="$(convert_bytes ${file_size_difference_bytes} "${check_unit}")"
+  fi
+  percent_growth="$(echo "scale=2; ${new_file_size_bytes} / ${old_file_size_bytes} * 100 - 100" | bc -l)"
+  percent_shrinkage="$(echo "scale=2; (1 - (${new_file_size_bytes} / ${old_file_size_bytes})) * 100" | bc -l)"
+
+  exit_message="size_bytes=${new_file_size_bytes};message="
+
+  if [[ "${check}" == "change" ]]; then
+    if [[ ${file_size_difference_bytes} -ne 0 ]]; then
+      exit_code="${CHANGE_ERROR_CODE}"
+    fi
+  elif [[ "${check}" == "same" ]]; then
+    if [[ ${file_size_difference_bytes} -eq 0 ]]; then
+      exit_code="${SAME_ERROR_CODE}"
+    fi
+  elif [[ "${check}" == "grow" ]]; then
+    if [[ "${check_unit}" == "percent" ]]; then
+      if (( $(echo "${percent_growth} > ${check_value}" | bc -l ) )); then
+        exit_code="${GROW_ERROR_CODE}"
+      fi
+    elif (( $(echo "${file_size_difference_converted} >= ${check_value}" | bc -l ) )); then
+      exit_code="${GROW_ERROR_CODE}"
+    fi
+  elif [[ "${check}" == "shrink" ]]; then
+    if [[ "${check_unit}" == "percent" ]]; then
+      if (( $(echo "${percent_shrinkage} > ${check_value}" | bc -l ) )); then
+        exit_code="${SHRINK_ERROR_CODE}"
+      fi
+    elif (( $(echo "${file_size_difference_converted} <= $((check_value * -1))" | bc -l ) )); then
+      exit_code="${SHRINK_ERROR_CODE}"
+    fi
+  fi
+
+  case "${exit_code}" in
+    0)
+      exit_message="${exit_message}file size ok.  It is ${new_file_size_converted}${new_file_size_unit}."
+      ;;
+    "${CHANGE_ERROR_CODE}")
+      exit_message="${exit_message}file size changed! Was ${old_file_size_converted}${old_file_size_unit}, but now is ${new_file_size_converted}${new_file_size_unit}!"
+      ;;
+    "${SAME_ERROR_CODE}")
+      exit_message="${exit_message}file size has not changed! It is ${new_file_size_converted}${new_file_size_unit}!"
+      ;;
+    "${GROW_ERROR_CODE}")
+      exit_message="${exit_message}file size grew by ${percent_growth}%! Was ${old_file_size_converted}${old_file_size_unit}, but now is ${new_file_size_converted}${new_file_size_unit}!"
+      ;;
+    "${SHRINK_ERROR_CODE}")
+      exit_message="${exit_message}file size shrank by ${percent_shrinkage}%! Was ${old_file_size_converted}${old_file_size_unit}, but now is ${new_file_size_converted}${new_file_size_unit}!"
+      ;;
+  esac
+
+  set_new_file_size "${file_to_check}" "${new_file_size_bytes}"
+
+}
+
+main "$@"
+exit_cleanly "${exit_code}" "${exit_message}"

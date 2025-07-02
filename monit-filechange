@@ -446,5 +446,6 @@ function main () {
 
 }
 
+
 main "$@"
 exit_cleanly "${exit_code}" "${exit_message}"

@@ -30,7 +30,6 @@ monit-filechange [OPTIONS] [FILE]
 | -G, --growgb=SIZE        | Errors if the file has grown by SIZE gb |
 | -g, --shrinkgb=SIZE      | Errors if the file has shrunk by SIZE gb |
 
-
 ## Examples
 
 ```bash

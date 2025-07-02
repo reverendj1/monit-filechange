@@ -396,7 +396,7 @@ function main () {
   percent_growth="$(echo "scale=2; ${new_file_size_bytes} / ${old_file_size_bytes} * 100 - 100" | bc -l)"
   percent_shrinkage="$(echo "scale=2; (1 - (${new_file_size_bytes} / ${old_file_size_bytes})) * 100" | bc -l)"
 
-  exit_message="size_bytes=${new_file_size_bytes};message="
+  exit_message="new_size_bytes=${new_file_size_bytes};old_size_bytes=${old_file_size_bytes};size_difference_bytes=${file_size_difference_bytes};message="
 
   if [[ "${check}" == "change" ]]; then
     if [[ ${file_size_difference_bytes} -ne 0 ]]; then
